@@ -198,6 +198,8 @@ export async function buildApp(config, { logger = false } = {}) {
     const token = parseCookies(request.headers.cookie)[cookie];
     const { session, problem } = sessions.resolve(token, request.clientIp, request.ua);
     request.session = session;
+    // A switched-off account should see the banned screen, not the sign-in page.
+    request.accountBanned = problem === 'disabled';
     if (problem && problem !== 'unknown' && problem !== 'malformed') {
       reply.header('Set-Cookie', serializeCookie(cookie, '', { secure: config.cookieSecure, maxAgeSeconds: 0 }));
       if (problem === 'fingerprint') audit.record('session.anomaly', { severity: 'high', ip: request.clientIp, detail: { reason: 'user-agent changed mid-session; session revoked' } });
@@ -245,7 +247,10 @@ export async function buildApp(config, { logger = false } = {}) {
   // ─── Guards ─────────────────────────────────────────────────────────
   const requireSession = () => async request => {
     const s = request.session;
-    if (!s) throw new HttpError(401, 'UNAUTHENTICATED', 'Sign in required.');
+    if (!s) {
+      if (request.accountBanned) throw new HttpError(403, 'BANNED', 'This account has been switched off by the administrator.', { account: true });
+      throw new HttpError(401, 'UNAUTHENTICATED', 'Sign in required.');
+    }
     if (!['GET', 'HEAD'].includes(request.method)) {
       const sent = String(request.headers['x-csrf-token'] ?? '');
       const a = Buffer.from(sent);
@@ -451,7 +456,10 @@ export async function buildApp(config, { logger = false } = {}) {
 
   app.get('/api/auth/me', async request => {
     const s = request.session;
-    if (!s) throw new HttpError(401, 'UNAUTHENTICATED', 'Sign in required.');
+    if (!s) {
+      if (request.accountBanned) throw new HttpError(403, 'BANNED', 'This account has been switched off by the administrator.', { account: true });
+      throw new HttpError(401, 'UNAUTHENTICATED', 'Sign in required.');
+    }
     const user = db.prepare('SELECT id, username, display_name, role, created_at, password_changed_at, last_login_at, last_login_ip FROM users WHERE id = ?').get(s.user_id);
     const previous = db.prepare("SELECT ts, ip, ua FROM login_attempts WHERE username = ? AND result = 'success' ORDER BY id DESC LIMIT 1 OFFSET 1").get(s.username);
     const failedSince = previous

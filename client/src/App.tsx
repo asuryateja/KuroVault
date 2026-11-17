@@ -130,7 +130,7 @@ export function App() {
     void resolve();
   }, [resolve]);
 
-  useEffect(() => onApiError(err => { if (err.code === 'BANNED') setPhase({ kind: 'banned', until: (err.extra?.until as number) ?? null }); }), []);
+  useEffect(() => onApiError(err => { if (err.code === 'BANNED' || err.code === 'ACCOUNT_DISABLED') setPhase({ kind: 'banned', until: (err.extra?.until as number) ?? null }); }), []);
 
   const signedOut = useCallback(() => { setCsrf(''); void resolve(); }, [resolve]);
 

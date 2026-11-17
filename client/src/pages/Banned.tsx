@@ -9,7 +9,15 @@ function untilText(until: number | null) {
   return `Access is blocked for about ${Math.ceil(hours / 24)} more days.`;
 }
 
+import { useEffect } from 'react';
+
 export function BannedScreen({ until }: { until: number | null }) {
+  // Hard lockout: freeze the page behind the takeover so there is nothing to scroll or reach.
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, []);
   return (
     <div className="banned" role="alert" aria-label="Access blocked">
       <svg className="banned-art" viewBox="0 0 520 520" aria-hidden="true">

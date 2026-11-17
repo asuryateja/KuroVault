@@ -124,7 +124,7 @@ export function Gate({ registration, adminReady, invite, onAuthenticated }: { re
 
       <main className="cover-stage">
         <section className="cover-title" aria-label="Kurovault">
-          <CoverArt />
+          <CoverSeal />
           <p className="cover-kicker">Your Telegram files · one private shelf</p>
           <h2 className="cover-name" aria-hidden="true">KUROVAULT</h2>
           <p className="cover-tag"><span>Open it.</span> <span>Play it.</span> <span>Keep it yours.</span></p>
@@ -169,47 +169,35 @@ export function Gate({ registration, adminReady, invite, onAuthenticated }: { re
   );
 }
 
-/** Cover art, drawn like a manga splash page: a halftone burst, speed lines, and three ink panels. */
-function CoverArt() {
-  const rays = Array.from({ length: 28 }, (_, i) => i * (360 / 28));
+/** An inked Japanese seal (hanko): a weathered double ring, a samurai kabuto helmet, and the kanji 黒蔵 (black vault). */
+function CoverSeal() {
   return (
-    <svg className="cover-art" viewBox="0 0 600 420" aria-hidden="true">
-      <defs>
-        <pattern id="tone" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><circle cx="4.5" cy="4.5" r="2.4" fill="#e9e4d8" /></pattern>
-        <pattern id="tone-s" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><circle cx="3" cy="3" r="1.1" fill="#e9e4d8" /></pattern>
-        <radialGradient id="fade" cx="50%" cy="50%" r="50%"><stop offset="0" stopColor="#e9e4d8" /><stop offset=".55" stopColor="#e9e4d8" stopOpacity=".55" /><stop offset="1" stopColor="#e9e4d8" stopOpacity="0" /></radialGradient>
-        <mask id="burst"><circle cx="330" cy="200" r="230" fill="url(#fade)" /></mask>
-      </defs>
-      <circle cx="330" cy="200" r="150" fill="#e9e4d8" opacity=".06" />
-      <g className="cover-rays" stroke="#e9e4d8" strokeLinecap="round">
-        {rays.map((a, i) => <line key={a} x1="330" y1="200" x2="330" y2="-140" strokeWidth={i % 3 === 0 ? 3 : 1.2} strokeDasharray={i % 2 ? '70 300' : '40 330'} strokeDashoffset={i % 2 ? -150 : -190} transform={`rotate(${a} 330 200)`} opacity={i % 3 === 0 ? 0.9 : 0.5} />)}
-      </g>
-      <g className="ink ink-a" transform="translate(96 150) rotate(-9 90 70)">
-        <rect x="7" y="7" width="180" height="128" rx="10" fill="#8f8c85" />
-        <rect width="180" height="128" rx="10" fill="#101013" stroke="#e9e4d8" strokeWidth="4" />
-        <rect x="12" y="12" width="156" height="74" rx="6" fill="#55545c" />
-        <path d="M78 30v38l32-19Z" fill="#e9e4d8" stroke="#101013" strokeWidth="3" strokeLinejoin="round" />
-        <rect x="12" y="98" width="96" height="9" fill="#e9e4d8" /><rect x="12" y="113" width="58" height="6" fill="#8f8c85" />
-      </g>
-      <g className="ink ink-c" transform="translate(380 176) rotate(8 80 60)">
-        <rect x="7" y="7" width="164" height="118" rx="10" fill="#8f8c85" />
-        <rect width="164" height="118" rx="10" fill="#101013" stroke="#e9e4d8" strokeWidth="4" />
-        <rect x="14" y="14" width="42" height="54" fill="#e9e4d8" /><path d="M35 14v54M29 24h12M29 34h12M29 44h12" stroke="#101013" strokeWidth="3" />
-        <rect x="68" y="20" width="80" height="9" fill="#e9e4d8" /><rect x="68" y="38" width="56" height="6" fill="#8f8c85" />
-        <rect x="14" y="82" width="134" height="6" fill="#8f8c85" /><rect x="14" y="96" width="80" height="8" fill="#55545c" />
-      </g>
-      <g className="ink ink-b" transform="translate(214 96)">
-        <rect x="8" y="8" width="208" height="170" rx="14" fill="#8f8c85" />
-        <rect width="208" height="170" rx="14" fill="#101013" stroke="#e9e4d8" strokeWidth="5" />
-        <rect x="16" y="16" width="176" height="96" rx="8" fill="#e9e4d8" />
-        <rect x="16" y="16" width="176" height="96" fill="none" />
-        <circle cx="104" cy="64" r="27" fill="#101013" /><path d="M95 49v30l26-15Z" fill="#e9e4d8" />
-        <rect x="16" y="126" width="112" height="10" fill="#e9e4d8" /><rect x="16" y="144" width="70" height="7" fill="#8f8c85" />
-        <rect x="152" y="134" width="40" height="18" fill="#e9e4d8" />
-      </g>
-      <g className="cover-sfx" fill="#e9e4d8" stroke="#101013" strokeWidth="3" strokeLinejoin="round">
-        <path d="M470 60l10 24 26 2-20 17 7 26-23-14-22 14 6-26-20-17 26-2Z" />
-        <path d="M120 96l6 14 15 1-12 10 4 15-13-8-13 8 4-15-12-10 15-1Z" />
+    <svg className="cover-seal" viewBox="0 0 240 240" role="img" aria-label="Kurovault seal">
+      <g className="seal-ink">
+        {/* weathered seal rings */}
+        <circle cx="120" cy="120" r="112" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.4" />
+        <circle cx="120" cy="120" r="104" fill="none" stroke="currentColor" strokeWidth="8" />
+        <circle cx="120" cy="120" r="90" fill="none" stroke="currentColor" strokeWidth="2" />
+        {/* samurai kabuto */}
+        <g fill="currentColor">
+          {/* crescent maedate (crest) */}
+          <path d="M120 40c-20 0-37 12-45 30 10-9 23-14 45-14s35 5 45 14c-8-18-25-30-45-30z" />
+          {/* helmet bowl */}
+          <path d="M78 116c0-30 19-50 42-50s42 20 42 50c-28-11-56-11-84 0z" />
+          <path d="M120 66c-4 10-4 40-4 50h8c0-10 0-40-4-50z" fill="var(--bg)" opacity="0.9" />
+          {/* fukigaeshi (side flaps) */}
+          <path d="M70 118c-8 2-16 8-20 16 10-4 20-5 30-4z" />
+          <path d="M170 118c8 2 16 8 20 16-10-4-20-5-30-4z" />
+          {/* shikoro (neck guard, layered) */}
+          <path d="M80 120h80l-5 14H85z" />
+          <path d="M74 136h92l-6 15H80z" />
+          <path d="M68 153h104l-7 15H75z" />
+          {/* face opening */}
+          <ellipse cx="120" cy="132" rx="11" ry="13" fill="var(--bg)" />
+        </g>
+        {/* kanji flanking the helmet */}
+        <text className="seal-kanji" x="40" y="138" textAnchor="middle">黒</text>
+        <text className="seal-kanji" x="200" y="138" textAnchor="middle">蔵</text>
       </g>
     </svg>
   );

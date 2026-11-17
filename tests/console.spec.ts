@@ -854,7 +854,10 @@ test('hardening: members manage their own devices; the admin can switch an accou
   const row = accounts.getByRole('row').filter({ hasText: '@dana' });
   await row.getByRole('button', { name: 'Switch off' }).click();
   await expect(row.getByText('switched off')).toBeVisible();
-  expect((await phone.get('/api/auth/me')).status()).toBe(401);
+  // A switched-off account is banned: its live session now gets 403 BANNED (and will show the banned screen).
+  const meAfterOff = await phone.get('/api/auth/me');
+  expect(meAfterOff.status()).toBe(403);
+  expect((await meAfterOff.json()).error.code).toBe('BANNED');
   const refused = await signInApi(laptop, 'dana', reg.password);
   expect(refused.status()).toBe(403);
   expect((await refused.json()).error.code).toBe('ACCOUNT_DISABLED');

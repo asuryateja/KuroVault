@@ -48,8 +48,8 @@ export function createSessionStore(db, config) {
       const row = db.prepare(`SELECT s.*, u.username, u.role, u.display_name, u.disabled_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id_hash = ?`).get(idHash);
       const now = Date.now();
       if (!row) return { session: null, problem: 'unknown' };
-      if (row.revoked_at) return { session: null, problem: 'revoked' };
       if (row.disabled_at) return { session: null, problem: 'disabled' };
+      if (row.revoked_at) return { session: null, problem: 'revoked' };
       if (row.expires_at <= now) return { session: null, problem: 'expired' };
       // Sliding expiry: every visit pushes the end date out again (written at most once a minute).
       const slide = now - row.last_seen > 60_000 || row.last_ip !== ip;
