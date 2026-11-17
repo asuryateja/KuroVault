@@ -14,12 +14,14 @@ import { createAudit } from './security/audit.js';
 import { applySecurityHeaders } from './security/headers.js';
 import { classifyIp, describeAgent, normalizeIp } from './security/ip.js';
 import { dummyVerify, hashPassword, passwordProblems, verifyPassword } from './security/passwords.js';
-import { createBlocklist, lockMinutesForLevel, SlidingWindow } from './security/ratelimit.js';
+import { createBlocklist, lockMinutesForLevel, PERMANENT_UNTIL, SlidingWindow } from './security/ratelimit.js';
 import { cookieName, createSessionStore, parseCookies, serializeCookie } from './security/sessions.js';
 import { createGeo } from './security/geo.js';
 import { createVault, sha256 } from './security/vault.js';
 import { createTelegramService, ensureTelegramTables, TgError } from './telegram/service.js';
 import { ArchiveError, createArchiveService, parseRange } from './archive.js';
+import { fetchChecked, LinkError, linkKind, probeLink, resolveMediaType, MEDIA_MIME, parseLinkUrl } from './links.js';
+import { createStreamtape, StreamtapeError } from './streamtape.js';
 import { createPrefetcher } from './telegram/prefetch.js';
 
 const VERSION = '1.0.0';
@@ -165,7 +167,15 @@ export async function buildApp(config, { logger = false } = {}) {
     if (request.url.startsWith('/api/')) reply.header('Cache-Control', 'no-store');
 
     const blocked = blocklist.check(request.clientIp);
-    if (blocked) throw new HttpError(403, 'IP_BLOCKED', 'Access from this address is blocked.', { until: blocked.until });
+    if (blocked) {
+      request.banned = blocked;
+      // Let the app shell and the status probe load, so a blocked visitor is shown the banned screen
+      // instead of a raw error. Every other API route is refused.
+      const path = request.url.split('?')[0];
+      if (path.startsWith('/api/') && path !== '/api/public/status') {
+        throw new HttpError(403, 'BANNED', 'Access from this address is blocked.', { until: blocked.until });
+      }
+    }
 
     const limit = globalLimiter.hit(request.clientIp);
     if (!limit.allowed) {
@@ -306,7 +316,7 @@ export async function buildApp(config, { logger = false } = {}) {
   };
 
   // ─── Public (pre-login) ─────────────────────────────────────────────
-  app.get('/api/public/status', async () => ({
+  app.get('/api/public/status', async request => ({
     product: 'Kurovault',
     version: VERSION,
     registration: config.allowRegistration,
@@ -314,6 +324,8 @@ export async function buildApp(config, { logger = false } = {}) {
     adminReady: adminExists(),
     serverTime: Date.now(),
     signedIn: false,
+    banned: Boolean(request.banned),
+    bannedUntil: request.banned?.until ?? null,
   }));
 
   app.get('/api/public/connection', async request => {
@@ -656,10 +668,11 @@ export async function buildApp(config, { logger = false } = {}) {
     const ip = normalizeIp(body(request, 'ip', { max: 64 }));
     if (classifyIp(ip).version === 0) throw new HttpError(400, 'INVALID_IP', 'Enter a valid IPv4 or IPv6 address.');
     if (ip === request.clientIp) throw new HttpError(400, 'SELF_BLOCK', 'You cannot block the address you are connected from.');
+    const permanent = request.body?.permanent === true;
     const minutes = Math.min(525_600, Math.max(5, Number(request.body?.minutes) || 1440));
     const reason = body(request, 'reason', { max: 200, required: false }) || 'Blocked by operator';
-    blocklist.block(ip, minutes, reason, request.session.username);
-    audit.record('ip.blocked', { severity: 'high', actor: request.session.username, ip: request.clientIp, detail: { target: ip, minutes, reason } });
+    blocklist.block(ip, minutes, reason, request.session.username, { permanent });
+    audit.record('ip.blocked', { severity: 'high', actor: request.session.username, ip: request.clientIp, detail: { target: ip, permanent, minutes, reason } });
     return { ok: true };
   });
 
@@ -1522,6 +1535,145 @@ export async function buildApp(config, { logger = false } = {}) {
     if (!['favorite', 'pin', 'recent'].includes(value)) throw new HttpError(400, 'INVALID_KIND', 'Unknown list.');
     return value;
   };
+
+  // ─── External media links ───────────────────────────────────────────
+  // Paste a public, directly-hosted audio/video/image/PDF URL and play it in the same viewer.
+  // The server streams it (with range seeking) behind an SSRF guard; it never defeats a site's
+  // sign-in, app-wall or ad-gate, and only passes through responses that are themselves media.
+  const linkJson = r => ({ id: r.id, url: r.url, title: r.title, mime: r.mime, kind: linkKind(r.mime), size: r.size, added_at: r.added_at, src: `/api/links/${r.id}/stream` });
+
+  app.get('/api/links', authed, async request => ({
+    links: db.prepare('SELECT * FROM links WHERE user_id = ? ORDER BY added_at DESC').all(request.session.user_id).map(linkJson),
+  }));
+
+  app.post('/api/links', authed, async request => {
+    const rawUrl = body(request, 'url', { max: 2048 }).trim();
+    const givenTitle = body(request, 'title', { max: 200, required: false }).trim();
+    if (db.prepare('SELECT COUNT(*) AS n FROM links WHERE user_id = ?').get(request.session.user_id).n >= config.maxLinks) {
+      throw new HttpError(403, 'LINK_LIMIT', `You can save up to ${config.maxLinks} links.`);
+    }
+    const parsed = parseLinkCaught(rawUrl);
+    let probe;
+    try { probe = await probeLink(rawUrl, { allowLocal: config.allowLocalLinks }); }
+    catch (error) { throw asHttp(error); }
+    const title = (givenTitle || decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() || '') || parsed.hostname).slice(0, 200);
+    const info = db.prepare('INSERT INTO links(user_id, url, title, mime, size, added_at) VALUES(?, ?, ?, ?, ?, ?)')
+      .run(request.session.user_id, rawUrl, title, probe.mime, probe.size, Date.now());
+    audit.record('link.added', { actor: request.session.username, ip: request.clientIp, detail: { host: parsed.hostname, mime: probe.mime } });
+    return linkJson(db.prepare('SELECT * FROM links WHERE id = ?').get(info.lastInsertRowid));
+  });
+
+  app.delete('/api/links/:id', authed, async request => {
+    const id = Number(request.params.id);
+    const row = Number.isInteger(id) ? db.prepare('SELECT * FROM links WHERE id = ? AND user_id = ?').get(id, request.session.user_id) : null;
+    if (!row) throw new HttpError(404, 'NOT_FOUND', 'Link not found.');
+    db.prepare('DELETE FROM links WHERE id = ?').run(id);
+    audit.record('link.removed', { actor: request.session.username, ip: request.clientIp, detail: { id } });
+    return { ok: true };
+  });
+
+  app.get('/api/links/:id/stream', authed, async (request, reply) => {
+    const id = Number(request.params.id);
+    const row = Number.isInteger(id) ? db.prepare('SELECT * FROM links WHERE id = ? AND user_id = ?').get(id, request.session.user_id) : null;
+    if (!row) throw new HttpError(404, 'NOT_FOUND', 'Link not found.');
+    const signal = disconnectSignal(reply);
+    let result;
+    try { result = await fetchChecked(row.url, { range: request.headers.range, signal, allowLocal: config.allowLocalLinks }); }
+    catch (error) { throw asHttp(error); }
+    const up = result.res;
+    if (up.status >= 400) { try { await up.body?.cancel?.(); } catch { /* drained */ } throw new HttpError(502, 'LINK_UNREACHABLE', `The source returned ${up.status}.`); }
+    const type = resolveMediaType(up.headers.get('content-type'), result.finalUrl.href);
+    const inline = Boolean(type) && MEDIA_MIME.has(type);
+    reply.code(up.status === 206 ? 206 : 200);
+    reply.header('Content-Type', inline ? type : 'application/octet-stream');
+    const len = up.headers.get('content-length'); if (len) reply.header('Content-Length', len);
+    const cr = up.headers.get('content-range'); if (cr) reply.header('Content-Range', cr);
+    reply.header('Accept-Ranges', 'bytes');
+    reply.header('Content-Disposition', inline ? 'inline' : `attachment; filename="${row.title.replace(/[^\w.\- ]+/g, '_').slice(0, 80) || 'file'}"`);
+    reply.header('Cache-Control', 'private, no-store');
+    reply.header('Content-Security-Policy', "sandbox; default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'");
+    return pipeUpstream(reply, up);
+  });
+
+  function parseLinkCaught(raw) { try { return parseLinkUrl(raw); } catch (error) { throw asHttp(error); } }
+  function asHttp(error) {
+    if (error instanceof LinkError) return new HttpError(error.status, error.code, error.message);
+    if (error?.name === 'AbortError') return new HttpError(499, 'ABORTED', 'Request aborted.');
+    return new HttpError(502, 'LINK_UNREACHABLE', 'That link could not be reached.');
+  }
+
+  // ─── Streamtape (your own account) ──────────────────────────────────
+  const streamtape = createStreamtape(config);
+  const stKey = uid => `st_creds:${uid}`;
+  const stCreds = uid => { const v = getSetting(db, stKey(uid)); if (!v) return null; try { return JSON.parse(vault.open(v, stKey(uid))); } catch { return null; } };
+  const stSeal = (uid, c) => setSetting(db, stKey(uid), c === null ? null : vault.seal(JSON.stringify(c), stKey(uid)));
+  const stRequire = request => { const c = stCreds(request.session.user_id); if (!c) throw new HttpError(409, 'STREAMTAPE_NOT_CONNECTED', 'Connect your Streamtape account first.'); return c; };
+  const stHttp = error => (error instanceof StreamtapeError ? new HttpError(error.status, error.code, error.message) : error?.name === 'AbortError' ? new HttpError(499, 'ABORTED', 'Request aborted.') : new HttpError(502, 'STREAMTAPE_UNREACHABLE', 'Could not reach Streamtape.'));
+  const stFileJson = r => ({ id: `st:${r.linkid}`, linkid: r.linkid, name: r.name, size: r.size, converted: Boolean(r.converted), src: `/api/streamtape/files/${encodeURIComponent(r.linkid)}/stream` });
+
+  app.get('/api/streamtape/account', authed, async request => {
+    const c = stCreds(request.session.user_id);
+    if (!c) return { connected: false };
+    try { return { connected: true, loginHint: `••${String(c.login).slice(-4)}`, account: await streamtape.account(c) }; }
+    catch { return { connected: true, loginHint: `••${String(c.login).slice(-4)}`, account: null, warning: 'Could not reach Streamtape just now.' }; }
+  });
+
+  app.post('/api/streamtape/connect', authed, async request => {
+    const login = body(request, 'login', { max: 128 }).trim();
+    const key = body(request, 'key', { max: 256 }).trim();
+    let account;
+    try { account = await streamtape.account({ login, key }); }
+    catch (error) { throw stHttp(error); }
+    stSeal(request.session.user_id, { login, key });
+    audit.record('streamtape.connected', { actor: request.session.username, ip: request.clientIp });
+    return { connected: true, loginHint: `••${login.slice(-4)}`, account };
+  });
+
+  app.post('/api/streamtape/disconnect', authed, async request => {
+    stSeal(request.session.user_id, null);
+    db.prepare('DELETE FROM streamtape_files WHERE user_id = ?').run(request.session.user_id);
+    audit.record('streamtape.disconnected', { actor: request.session.username, ip: request.clientIp });
+    return { ok: true };
+  });
+
+  app.get('/api/streamtape/files', authed, async request => {
+    const c = stRequire(request);
+    const folder = typeof request.query?.folder === 'string' ? request.query.folder.slice(0, 64) : '';
+    let listing;
+    try { listing = await streamtape.listFolder(c, folder); }
+    catch (error) { throw stHttp(error); }
+    const now = Date.now();
+    const up = db.prepare('INSERT INTO streamtape_files(user_id, linkid, name, size, converted, updated_at) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, linkid) DO UPDATE SET name = excluded.name, size = excluded.size, converted = excluded.converted, updated_at = excluded.updated_at');
+    for (const f of listing.files) up.run(request.session.user_id, f.linkid, f.name, f.size, f.converted ? 1 : 0, now);
+    return { folder, folders: listing.folders, files: listing.files.map(stFileJson) };
+  });
+
+  app.get('/api/streamtape/files/:linkid/stream', authed, async (request, reply) => {
+    const c = stRequire(request);
+    const linkid = String(request.params.linkid);
+    // Ownership gate: only a file this account has listed through Kurovault can be played.
+    const row = db.prepare('SELECT * FROM streamtape_files WHERE user_id = ? AND linkid = ?').get(request.session.user_id, linkid);
+    if (!row) throw new HttpError(404, 'NOT_FOUND', 'That file is not in your Streamtape library. Open your Streamtape files first.');
+    const signal = disconnectSignal(reply);
+    let direct;
+    try { direct = await streamtape.directUrl(c, linkid, { signal }); }
+    catch (error) { throw stHttp(error); }
+    let result;
+    try { result = await streamtape.fetchStream(direct, { range: request.headers.range, signal }); }
+    catch (error) { throw asHttp(error); }
+    const upr = result.res;
+    if (upr.status >= 400) { try { await upr.body?.cancel?.(); } catch { /* drained */ } throw new HttpError(502, 'STREAMTAPE_UNREACHABLE', `Streamtape returned ${upr.status}.`); }
+    const type = resolveMediaType(upr.headers.get('content-type'), result.finalUrl.href) || 'video/mp4';
+    reply.code(upr.status === 206 ? 206 : 200);
+    reply.header('Content-Type', MEDIA_MIME.has(type) ? type : 'video/mp4');
+    const len = upr.headers.get('content-length'); if (len) reply.header('Content-Length', len);
+    const cr = upr.headers.get('content-range'); if (cr) reply.header('Content-Range', cr);
+    reply.header('Accept-Ranges', 'bytes');
+    reply.header('Content-Disposition', 'inline');
+    reply.header('Cache-Control', 'private, no-store');
+    reply.header('Content-Security-Policy', "sandbox; default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'");
+    return pipeUpstream(reply, upr);
+  });
 
   app.get('/api/vault/marks', authed, async request => {
     const kind = markKind(request.query?.kind);

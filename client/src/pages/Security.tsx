@@ -12,6 +12,7 @@ export function SecurityPage({ me }: { me: any }) {
   const [pwError, setPwError] = useState<unknown>(null);
   const [ip, setIp] = useState('');
   const [reason, setReason] = useState('');
+  const [duration, setDuration] = useState('1440');
   const [blockError, setBlockError] = useState<unknown>(null);
 
   async function changePassword(e: FormEvent) {
@@ -30,7 +31,8 @@ export function SecurityPage({ me }: { me: any }) {
     e.preventDefault();
     setBlockError(null);
     try {
-      await api('/api/console/blocks', { method: 'POST', body: { ip: ip.trim(), reason, minutes: 1440 } });
+      const body = duration === 'permanent' ? { ip: ip.trim(), reason, permanent: true } : { ip: ip.trim(), reason, minutes: Number(duration) };
+      await api('/api/console/blocks', { method: 'POST', body });
       setIp('');
       setReason('');
       void blocks.refresh();
@@ -74,7 +76,14 @@ export function SecurityPage({ me }: { me: any }) {
         <form className="form form-row" onSubmit={block}>
           <input className="input-sm mono" placeholder="IPv4 or IPv6 address" value={ip} onChange={e => setIp(e.target.value)} required aria-label="IP address to block" />
           <input className="input-sm" placeholder="Reason" value={reason} onChange={e => setReason(e.target.value)} maxLength={200} aria-label="Reason" />
-          <button className="btn btn-danger btn-sm">Block for 24 h</button>
+          <select className="input-sm" value={duration} onChange={e => setDuration(e.target.value)} aria-label="Block duration">
+            <option value="60">1 hour</option>
+            <option value="1440">24 hours</option>
+            <option value="10080">7 days</option>
+            <option value="43200">30 days</option>
+            <option value="permanent">Permanent</option>
+          </select>
+          <button className="btn btn-danger btn-sm">Block</button>
         </form>
         <ErrorNote error={blockError} />
         {blocks.data && (blocks.data.blocks.length === 0 ? <Empty>No addresses are blocked.</Empty> : (
@@ -83,7 +92,7 @@ export function SecurityPage({ me }: { me: any }) {
             { key: 'reason', label: 'Reason', render: b => b.reason },
             { key: 'by', label: 'By', render: b => b.created_by },
             { key: 'since', label: 'Since', className: 'mono nowrap', render: b => fmtTime(b.created_at) },
-            { key: 'until', label: 'Until', className: 'mono nowrap', render: b => fmtTime(b.until) },
+            { key: 'until', label: 'Until', className: 'mono nowrap', render: b => (b.until >= 4_100_000_000_000 ? 'Permanent' : fmtTime(b.until)) },
             { key: 'hits', label: 'Hits', className: 'num', render: b => b.hits },
             { key: 'act', label: 'Action', actions: true, render: b => <button className="btn btn-ghost btn-sm" onClick={() => unblock(b.ip)}>Unblock</button> },
           ]} />

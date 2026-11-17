@@ -207,9 +207,13 @@ test('failed sign-ins are recorded with source IP, username tried and result', a
 test('an IP is automatically blocked after repeated failures', async ({ playwright }) => {
   const bot = await visitor(playwright, '192.0.2.99');
   for (let i = 0; i < 12; i += 1) expect((await bot.post('/api/auth/login', { data: { username: `user${i}`, password: 'x'.repeat(12) } })).status()).toBe(401);
+  // The status probe stays reachable (so the banned screen can load) and reports the ban…
   const after = await bot.get('/api/public/status');
-  expect(after.status()).toBe(403);
-  expect((await after.json()).error.code).toBe('IP_BLOCKED');
+  expect(after.status()).toBe(200);
+  expect((await after.json()).banned).toBe(true);
+  // …while every other API route is refused.
+  expect((await bot.get('/api/auth/me')).status()).toBe(403);
+  expect((await (await bot.get('/api/auth/me')).json()).error.code).toBe('BANNED');
   await bot.dispose();
   const page = await context.newPage();
   await page.goto('/#visitors');
@@ -660,13 +664,19 @@ test('blocklist: operator blocks and unblocks an address', async ({ playwright }
   await page.goto('/#security');
   await page.getByLabel('IP address to block').fill('192.0.2.77');
   await page.getByLabel('Reason').fill('scanner');
-  await page.getByRole('button', { name: 'Block for 24 h' }).click();
-  await expect(page.locator('tr', { hasText: '192.0.2.77' })).toContainText('scanner');
+  await page.getByLabel('Block duration').selectOption('permanent');
+  await page.getByRole('button', { name: 'Block', exact: true }).click();
+  const scannerRow = page.locator('tr', { hasText: '192.0.2.77' });
+  await expect(scannerRow).toContainText('scanner');
+  // A permanent block shows as such and does not expire on its own.
+  await expect(scannerRow).toContainText('Permanent');
   const target = await visitor(playwright, '192.0.2.77');
-  expect((await target.get('/api/public/status')).status()).toBe(403);
+  // Blocked: the status probe still answers (for the banned screen) and reports the ban; real routes 403.
+  expect((await (await target.get('/api/public/status')).json()).banned).toBe(true);
+  expect((await target.get('/api/auth/me')).status()).toBe(403);
   await page.locator('tr', { hasText: '192.0.2.77' }).getByRole('button', { name: 'Unblock' }).click();
   await expect(page.locator('tr', { hasText: '192.0.2.77' })).toHaveCount(0);
-  expect((await target.get('/api/public/status')).status()).toBe(200);
+  expect((await (await target.get('/api/public/status')).json()).banned).toBeFalsy();
   await target.dispose();
   await shot(page, '08-security');
   await page.close();
@@ -721,6 +731,7 @@ test('every screen fits phones, tablets, laptops and large desktops without side
       await page.goto(`/#${route}`);
       await page.waitForLoadState('networkidle');
       await expect(page.locator('.page, .vault').first()).toBeVisible();
+      await page.evaluate(() => Promise.all(document.getAnimations().filter(a => { try { return a.effect.getComputedTiming().iterations !== Infinity; } catch { return false; } }).map(a => a.finished.catch(() => {}))));
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       expect(overflow, `${vp.name} ${route} overflow`).toBeLessThanOrEqual(1);
       if (route === 'drive') await expect(page.locator('.file-grid, table.rtable').first()).toBeVisible();
@@ -894,6 +905,56 @@ test('on a phone the sign-in screen shows only the sign-in box', async ({ browse
     expect(covered, `${name} tab is covered`).toBe(false);
   }
   await page.getByRole('tab', { name: 'Create account' }).click();
+  await expect(page.locator('.auth-tabs')).toHaveAttribute('data-mode', 'register');
   await expect(page.getByLabel('Confirm password')).toBeVisible();
   await phone.close();
+});
+
+
+test('links: the server refuses URLs that resolve to private or local addresses (SSRF guard)', async ({ playwright }) => {
+  const ctx = await visitor(playwright, '198.51.100.55');
+  await ctx.post('/api/auth/register', { data: { name: 'Link Guard', username: 'linkguard', password: 'Quiet-River-88', confirm: 'Quiet-River-88' } });
+  const token = (await (await ctx.get('/api/auth/me')).json()).csrf;
+  const post = (url) => ctx.post('/api/links', { data: { url }, headers: { 'X-CSRF-Token': token } });
+  for (const url of ['http://127.0.0.1:9000/x.mp4', 'http://169.254.169.254/latest/meta-data/x.mp4', 'http://localhost/x.mp4', 'http://10.0.0.5/x.mp4', 'http://[::1]/x.mp4']) {
+    const res = await post(url);
+    expect(res.status(), url).toBe(400);
+    expect(['BLOCKED_HOST', 'UNRESOLVABLE'], url).toContain((await res.json()).error.code);
+  }
+  await ctx.dispose();
+});
+
+
+test('a blocked visitor gets the banned takeover; everyone else is unaffected, and unblocking restores access', async ({ browser }) => {
+  const csrf = (await (await context.request.get('/api/auth/me')).json()).csrf;
+  expect((await context.request.post('/api/console/blocks', { data: { ip: '203.0.113.77', minutes: 60, reason: 'test ban' }, headers: { 'X-CSRF-Token': csrf } })).status()).toBe(200);
+
+  // The blocked address loads only the shell + status, then sees the banned screen.
+  const banned = await browser.newContext({ extraHTTPHeaders: { 'X-Forwarded-For': '203.0.113.77' } });
+  const bp = await banned.newPage();
+  const seen: Record<string, number> = {};
+  bp.on('response', r => { const m = r.url().match(/\/api\/([^?]+)/); if (m) seen[m[1]] = r.status(); });
+  await bp.goto('/');
+  await expect(bp.getByRole('heading', { name: 'BANNED' })).toBeVisible();
+  expect(seen['public/status']).toBe(200);
+  expect(seen['auth/me']).toBe(403);
+  // Every other API route truly refuses them.
+  expect((await (await banned.request.get('/api/console/users')).json()).error.code).toBe('BANNED');
+  expect((await banned.request.post('/api/auth/login', { data: { username: 'admin', password: 'x' } })).status()).toBe(403);
+  await banned.close();
+
+  // A different address still reaches the normal gate.
+  const other = await browser.newContext({ extraHTTPHeaders: { 'X-Forwarded-For': '203.0.113.78' } });
+  const op = await other.newPage();
+  await op.goto('/');
+  await expect(op.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+  await other.close();
+
+  // Unblocking lets the address back in.
+  expect((await context.request.delete('/api/console/blocks/203.0.113.77', { headers: { 'X-CSRF-Token': csrf } })).status()).toBe(200);
+  const back = await browser.newContext({ extraHTTPHeaders: { 'X-Forwarded-For': '203.0.113.77' } });
+  const kp = await back.newPage();
+  await kp.goto('/');
+  await expect(kp.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+  await back.close();
 });

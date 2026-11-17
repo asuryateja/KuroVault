@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState, type JSX } from 'react';
 import { api, ApiError, onApiError, setCsrf } from './api';
 import { ago, fmtClock } from './format';
 import { Loading, useNow } from './ui';
-import { IconFile, IconFit, IconFolder, IconGrid, IconList, IconLock, IconWave } from './icons';
+import { IconFile, IconFit, IconFolder, IconGrid, IconLink, IconList, IconLock, IconWave } from './icons';
 import { DrivePage } from './pages/Drive';
+import { LinksPage } from './pages/Links';
+import { BannedScreen } from './pages/Banned';
 import { Gate } from './pages/Gate';
 import { AccessLog, AuditTrail, Overview, Sessions, SystemPage, Visitors } from './pages/Intel';
 import { SecurityPage } from './pages/Security';
@@ -15,16 +17,17 @@ const NAV = [
   { id: 'sessions', label: 'Sessions & users', group: 'Intelligence', admin: true },
   { id: 'audit', label: 'Audit trail', group: 'Intelligence', admin: true },
   { id: 'drive', label: 'Vault', group: 'Library', admin: false },
+  { id: 'links', label: 'Links', group: 'Library', admin: false },
   { id: 'security', label: 'Account & security', group: 'Library', admin: false },
   { id: 'system', label: 'System', group: 'Library', admin: true },
 ] as const;
 
 const TAB_ICON: Record<string, JSX.Element> = {
   overview: <IconGrid />, access: <IconLock />, visitors: <IconWave />, sessions: <IconList />, audit: <IconFile />,
-  drive: <IconFolder />, security: <IconLock />, system: <IconFit />,
+  drive: <IconFolder />, links: <IconLink />, security: <IconLock />, system: <IconFit />,
 };
 
-type Phase = { kind: 'boot' } | { kind: 'gate'; registration: boolean; adminReady: boolean; invite: boolean } | { kind: 'console'; me: any };
+type Phase = { kind: 'boot' } | { kind: 'banned'; until: number | null } | { kind: 'gate'; registration: boolean; adminReady: boolean; invite: boolean } | { kind: 'console'; me: any };
 
 function Console({ me, onSignedOut }: { me: any; onSignedOut: () => void }) {
   const now = useNow();
@@ -96,6 +99,7 @@ function Console({ me, onSignedOut }: { me: any; onSignedOut: () => void }) {
         {admin && page === 'sessions' && <Sessions />}
         {admin && page === 'audit' && <AuditTrail />}
         {page === 'drive' && <DrivePage />}
+        {page === 'links' && <LinksPage />}
         {page === 'security' && <SecurityPage me={me} />}
         {admin && page === 'system' && <SystemPage />}
       </main>
@@ -115,6 +119,7 @@ export function App() {
     } catch (err) {
       if (!(err instanceof ApiError) || err.status !== 401) console.warn(err);
       const status = await api('/api/public/status');
+      if (status.banned) { setPhase({ kind: 'banned', until: status.bannedUntil ?? null }); return; }
       setPhase({ kind: 'gate', registration: Boolean(status.registration), adminReady: Boolean(status.adminReady), invite: Boolean(status.inviteRequired) });
     }
   }, []);
@@ -125,9 +130,12 @@ export function App() {
     void resolve();
   }, [resolve]);
 
+  useEffect(() => onApiError(err => { if (err.code === 'BANNED') setPhase({ kind: 'banned', until: (err.extra?.until as number) ?? null }); }), []);
+
   const signedOut = useCallback(() => { setCsrf(''); void resolve(); }, [resolve]);
 
   if (phase.kind === 'boot') return <div className="boot"><Loading label="Loading" /></div>;
+  if (phase.kind === 'banned') return <BannedScreen until={phase.until} />;
   if (phase.kind === 'gate') return <Gate registration={phase.registration} adminReady={phase.adminReady} invite={phase.invite} onAuthenticated={() => void resolve()} />;
   return <Console me={phase.me} onSignedOut={signedOut} />;
 }

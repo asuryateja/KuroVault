@@ -68,6 +68,12 @@ export function loadConfig(overrides = {}) {
     // Ceilings that stop strangers from mass-creating accounts.
     maxUsers: int('TDC_MAX_USERS', 200, 1, 100000),
     signupsPerIpPerDay: int('TDC_SIGNUPS_PER_IP_PER_DAY', 3, 1, 1000),
+    // External media links: paste a direct audio/video URL to play it in the viewer.
+    maxLinks: int('TDC_MAX_LINKS', 200, 1, 100000),
+    // Test-only: allow links that point at localhost/private addresses (used by the test fixtures).
+    allowLocalLinks: process.env.TDC_ALLOW_LOCAL_LINKS === '1',
+    // Streamtape API base; overridable so tests can point at a fake server.
+    streamtapeBase: process.env.TDC_STREAMTAPE_BASE || 'https://api.streamtape.com',
     // Optional: one Telegram API ID/hash for everybody, so users sign in with just their phone number.
     telegramApiId: /^\d{3,12}$/.test(process.env.TDC_TELEGRAM_API_ID ?? '') ? process.env.TDC_TELEGRAM_API_ID : '',
     telegramApiHash: /^[0-9a-f]{32}$/i.test(process.env.TDC_TELEGRAM_API_HASH ?? '') ? process.env.TDC_TELEGRAM_API_HASH.toLowerCase() : '',

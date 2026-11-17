@@ -26,6 +26,12 @@ export default defineConfig({
       env: { FAKE_DRIVE_PORT: '18550', FAKE_DRIVE_KEY: 'test-drive-key' },
     },
     {
+      command: 'node tests/fake-streamtape.js',
+      url: 'http://127.0.0.1:18595/health',
+      reuseExistingServer: false,
+      env: { FAKE_ST_PORT: '18595', FAKE_ST_LOGIN: 'test-st-login', FAKE_ST_KEY: 'test-st-key' },
+    },
+    {
       command: `rm -rf ${DATA_DIR} && node --disable-warning=ExperimentalWarning server/index.js`,
       url: 'http://127.0.0.1:18640/api/public/status',
       reuseExistingServer: false,
@@ -56,6 +62,9 @@ export default defineConfig({
         TDC_RATE_AUTH_PER_MINUTE: '60',
         // This server is by invitation only.
         TDC_INVITE_CODE: 'rook-takes-knight',
+        // External-link playback: allow the local fixture hosts, and point Streamtape at the fake API.
+        TDC_ALLOW_LOCAL_LINKS: '1',
+        TDC_STREAMTAPE_BASE: 'http://127.0.0.1:18595',
       },
     },
   ],

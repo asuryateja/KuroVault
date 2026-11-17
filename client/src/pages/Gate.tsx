@@ -132,7 +132,7 @@ export function Gate({ registration, adminReady, invite, onAuthenticated }: { re
 
         <section className="cover-form gate-auth" aria-label={mode === 'login' ? 'Sign in' : 'Create account'}>
           <span className="cover-form-pin" aria-hidden="true">{mode === 'login' ? 'ENTER' : 'JOIN'}</span>
-          <div className="auth-tabs" role="tablist">
+          <div className="auth-tabs" data-mode={mode} data-tabs={registration ? 2 : 1} role="tablist">
             <button type="button" role="tab" aria-selected={mode === 'login'} className={mode === 'login' ? 'on' : ''} onClick={() => switchTo('login')}>Sign in</button>
             {registration && <button type="button" role="tab" aria-selected={mode === 'register'} className={mode === 'register' ? 'on' : ''} onClick={() => switchTo('register')}>Create account</button>}
           </div>

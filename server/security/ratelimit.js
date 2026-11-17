@@ -1,4 +1,5 @@
 // Sliding-window limiter (in memory) + persistent IP blocks and account lockouts (SQLite).
+export const PERMANENT_UNTIL = 4_102_444_800_000; // ~year 2100: a block with no natural expiry.
 export class SlidingWindow {
   constructor(limit, windowMs) {
     this.limit = limit;
@@ -37,8 +38,10 @@ export function createBlocklist(db) {
       if (row) bump.run(ip);
       return row ?? null;
     },
-    block(ip, minutes, reason, by = 'system') {
-      upsert.run(ip, Date.now() + minutes * 60_000, reason, Date.now(), by);
+    // A far-future timestamp marks a block that never expires on its own (an operator must lift it).
+    block(ip, minutes, reason, by = 'system', { permanent = false } = {}) {
+      const until = permanent ? PERMANENT_UNTIL : Date.now() + minutes * 60_000;
+      upsert.run(ip, until, reason, Date.now(), by);
     },
     unblock(ip) {
       return remove.run(ip).changes > 0;

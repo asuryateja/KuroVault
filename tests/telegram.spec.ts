@@ -1,7 +1,8 @@
 // Direct-Telegram mode end to end: real server, database and browser UI.
 // Only Telegram itself is simulated (server/telegram/adapter-fake.js, enabled by two env vars).
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, createReadStream } from 'node:fs';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -133,7 +134,8 @@ test('the Vault opens on a home organised like Telegram: Saved Messages, channel
 // Phones: nothing may scroll the page sideways or stick out of the screen, and no field may be under 16px
 // (iPhone Safari zooms the whole page in when such a field is tapped, which knocks the layout off-centre).
 async function phoneLayoutProblems(page: Page) {
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(250);
+  await page.evaluate(() => Promise.all(document.getAnimations().filter(a => { try { return a.effect.getComputedTiming().iterations !== Infinity; } catch { return false; } }).map(a => a.finished.catch(() => {}))));
   return page.evaluate(() => {
     const vw = document.documentElement.clientWidth;
     const out: string[] = [];
@@ -699,3 +701,117 @@ test('a different API ID can still be entered when wanted', async () => {
   await page.close();
 });
 
+
+
+// A tiny public media host for the direct-link tests: serves a real clip with Range support,
+// plus a redirect, an octet-stream variant, and a non-media page.
+function mediaFixture(): Promise<{ base: string; close: () => Promise<void> }> {
+  const path = join(FIXTURES, 'clip.webm');
+  const size = statSync(path).size;
+  const server = createServer((req, res) => {
+    const url = new URL(req.url!, 'http://x');
+    if (url.pathname === '/page') { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<h1>not a video</h1>'); return; }
+    if (url.pathname === '/go') { res.writeHead(302, { location: '/clip.webm' }); res.end(); return; }
+    const octet = url.pathname === '/octet.bin';
+    if (url.pathname !== '/clip.webm' && !octet) { res.writeHead(404); res.end(); return; }
+    const type = octet ? 'application/octet-stream' : 'video/webm';
+    const m = req.headers.range && /bytes=(\d*)-(\d*)/.exec(req.headers.range);
+    if (m) {
+      const start = m[1] ? Number(m[1]) : 0;
+      const end = m[2] ? Number(m[2]) : size - 1;
+      res.writeHead(206, { 'content-type': type, 'accept-ranges': 'bytes', 'content-range': `bytes ${start}-${end}/${size}`, 'content-length': end - start + 1 });
+      createReadStream(path, { start, end }).pipe(res);
+    } else {
+      res.writeHead(200, { 'content-type': type, 'accept-ranges': 'bytes', 'content-length': size });
+      createReadStream(path).pipe(res);
+    }
+  });
+  return new Promise(resolve => server.listen(0, '127.0.0.1', () => {
+    const port = (server.address() as import('node:net').AddressInfo).port;
+    resolve({ base: `http://127.0.0.1:${port}`, close: () => new Promise<void>(r => server.close(() => r())) });
+  }));
+}
+async function csrf() { return (await (await context.request.get('/api/auth/me')).json()).csrf as string; }
+
+test('a public direct link plays in the viewer, with byte-range seeking', async () => {
+  const fx = await mediaFixture();
+  try {
+    const page = await context.newPage();
+    const statuses: number[] = [];
+    page.on('response', r => { if (/\/api\/links\/\d+\/stream/.test(r.url())) statuses.push(r.status()); });
+    await page.goto('/#links');
+    await page.getByLabel('Video or audio link').fill(`${fx.base}/clip.webm`);
+    await page.getByLabel('Name (optional)').fill('Public clip');
+    await page.getByRole('button', { name: 'Get video' }).click();
+    await page.getByRole('button', { name: 'Play Public clip' }).click();
+    const viewer = page.getByRole('dialog', { name: 'Viewing Public clip' });
+    const video = viewer.locator('video');
+    await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.readyState), { timeout: 20_000 }).toBeGreaterThanOrEqual(2);
+    await video.evaluate((v: HTMLVideoElement) => { v.muted = true; return v.play(); });
+    await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.currentTime), { timeout: 15_000 }).toBeGreaterThan(0.3);
+    await video.evaluate((v: HTMLVideoElement) => new Promise(res => { v.addEventListener('seeked', res, { once: true }); v.currentTime = 3; }));
+    expect(await video.evaluate((v: HTMLVideoElement) => v.currentTime)).toBeGreaterThanOrEqual(2.5);
+    expect(statuses).toContain(206);
+    await page.close();
+  } finally { await fx.close(); }
+});
+
+test('links: redirects are followed and octet-stream falls back to the extension; non-media and bad schemes are refused', async () => {
+  const fx = await mediaFixture();
+  const token = await csrf();
+  const post = (url: string) => context.request.post('/api/links', { data: { url }, headers: { 'X-CSRF-Token': token } });
+  try {
+    expect((await post(`${fx.base}/go`)).status()).toBe(200);
+    expect((await post(`${fx.base}/octet.bin?name=x.webm`)).ok()).toBeFalsy(); // octet with no media extension → refused
+    expect((await (await post(`${fx.base}/page`)).json()).error.code).toBe('NOT_MEDIA');
+    expect((await post('file:///etc/passwd')).status()).toBe(400);
+    expect((await post('ftp://example.com/x.mp4')).status()).toBe(400);
+  } finally { await fx.close(); }
+});
+
+test('Streamtape: connect your own account, list your files, and play one with range seeking', async () => {
+  const page = await context.newPage();
+  await page.goto('/#links');
+  // Wrong key is rejected.
+  await page.getByLabel('API login').fill('test-st-login');
+  await page.getByLabel('API key').fill('wrong-key');
+  await page.getByRole('button', { name: 'Connect Streamtape' }).click();
+  await expect(page.getByText(/rejected that API login/i)).toBeVisible();
+  // Right credentials connect and list files.
+  await page.getByLabel('API key').fill('test-st-key');
+  await page.getByRole('button', { name: 'Connect Streamtape' }).click();
+  const lib = page.getByRole('region', { name: 'Streamtape library' });
+  await expect(lib).toContainText('me@example.com');
+  await expect(lib.getByRole('button', { name: 'Play Lecture 01.mp4' })).toBeVisible();
+  // A still-processing file is present but not playable.
+  await expect(lib.getByRole('button', { name: 'Play Still processing.mp4' })).toBeDisabled();
+
+  const statuses: number[] = [];
+  page.on('response', r => { if (/\/api\/streamtape\/files\/.+\/stream/.test(r.url())) statuses.push(r.status()); });
+  await lib.getByRole('button', { name: 'Play Lecture 01.mp4' }).click();
+  const viewer = page.getByRole('dialog', { name: 'Viewing Lecture 01.mp4' });
+  const video = viewer.locator('video');
+  await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.readyState), { timeout: 20_000 }).toBeGreaterThanOrEqual(2);
+  await video.evaluate((v: HTMLVideoElement) => { v.muted = true; return v.play(); });
+  await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.currentTime), { timeout: 15_000 }).toBeGreaterThan(0.3);
+  await video.evaluate((v: HTMLVideoElement) => new Promise(res => { v.addEventListener('seeked', res, { once: true }); v.currentTime = 3; }));
+  expect(await video.evaluate((v: HTMLVideoElement) => v.currentTime)).toBeGreaterThanOrEqual(2.5);
+  expect(statuses).toContain(206);
+  await viewer.getByRole('button', { name: 'Close viewer' }).click();
+  await page.close();
+});
+
+test('Streamtape: only files in the account can be played; a made-up id is refused', async () => {
+  const token = await csrf();
+  const res = await context.request.get('/api/streamtape/files/not-a-real-linkid/stream', { headers: { 'X-CSRF-Token': token } });
+  expect(res.status()).toBe(404);
+});
+
+test('Streamtape: disconnect clears the credentials and the library', async () => {
+  const token = await csrf();
+  expect((await context.request.post('/api/streamtape/disconnect', { data: {}, headers: { 'X-CSRF-Token': token } })).ok()).toBeTruthy();
+  const after = await (await context.request.get('/api/streamtape/account')).json();
+  expect(after.connected).toBe(false);
+  // Files can no longer be listed without reconnecting.
+  expect((await context.request.get('/api/streamtape/files')).status()).toBe(409);
+});
